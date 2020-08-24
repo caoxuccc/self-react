@@ -1,74 +1,13 @@
 const RENDER_TO_DOM = Symbol('render to dom'); // 渲染节点
 const RANGE = Symbol('range'); // range
 
-/**
- * @description 处理元素节点
- * @data 2020/8/22
- * @param {*}
- */
-class ElementWrapper {
-  constructor(type) {
-    this.root = document.createElement(type)
-  }
 
-  /**
-   * @description 原生属性设置
-   * @data 2020/8/23
-   * @param {*}
-   */
-  setAttribute(name, value) {
-    // 过滤onClick属性，绑定原生事件
-    if (name.match(/on([\s\S]+)$/)) {
-      let eventName = RegExp.$1.replace(/^[\s\S]/, s => s.toLocaleLowerCase())
-      this.root.addEventListener(eventName, value)
-    } else if (name === 'className') this.root.setAttribute('class', value)
-    else this.root.setAttribute(name, value)
-  }
-
-  /**
-   * @description 拼接字节点
-   * @data 2020/8/23
-   * @param {Element ｜ ReactElement} component 字节点
-   */
-  appendChild(component) {
-    let range = document.createRange();
-    range.setStart(this.root, this.root.childNodes.length)
-    range.setEnd(this.root, this.root.childNodes.length)
-    component[RENDER_TO_DOM](range)
-  }
-
-  /**
-   * @description 渲染dom
-   * @data 2020/8/23
-   * @param {Range} range 渲染范围区间
-   */
-  [RENDER_TO_DOM](range) {
-    // 清空内容
-    range.deleteContents()
-    // 重新绘制
-    range.insertNode(this.root)
-  }
-}
-
-/**
- * @description  处理文本节点
- * @data 2020/8/22
- * @param {*}
- */
-class TextWrapper {
-  constructor(content) {
-    this.root = document.createTextNode(content)
-  }
-
-  /**
-   * @description 渲染dom
-   * @data 2020/8/23
-   * @param {Range} range 渲染范围区间
-   */
-  [RENDER_TO_DOM](range) {
-    range.deleteContents()
-    range.insertNode(this.root)
-  }
+function repalceContent(range, node) {
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.deleteContents();
+  range.setStartBefore(node);
+  range.setEndAfter(node);
 }
 
 export class Component {
@@ -98,6 +37,10 @@ export class Component {
     this.children.push(component);
   }
 
+  get vdom() {
+    return this.render().vdom
+  }
+
   /**
    * @description 渲染实体dom
    * @data 2020/8/23
@@ -105,28 +48,69 @@ export class Component {
    */
   [RENDER_TO_DOM](range) {
     this[RANGE] = range;
-    this.render()[RENDER_TO_DOM](range);
+    this.oldVdom = this.vdom
+    this.oldVdom[RENDER_TO_DOM](range);
   }
 
-  /**
-   * @description 更新渲染
-   * @data 2020/8/23
-   */
-  rerender() {
-    const oldRange = this[RANGE]; // 原组件在父组件中的所在位置区间
-    const newRange = document.createRange(); // 新区间用于保存新节点
+  update() {
+    // 判断新旧vdom是否一致
+    let isSameNode = (oldNode, newNode) => {
+      // 类型不同
+      if (oldNode.type !== newNode.type) return false;
+      // 新旧节点属性数量不同
+      if (Object.keys(newNode.props).length  !== Object.keys(oldNode.props).length) return false;
+      // 新旧节点属性值不同
+      for (let name in newNode.props) {
+        if (newNode.props[name] !== oldNode.props[name]) return false;
+      }
+      // 文本节点内容不同
+      if (newNode.type === '#text' && newNode.content !== oldNode.content)  return false;
 
-    // 在原oldRange初始点，插入一个区间，开始和结束位置都是oldRange的起始点
-    newRange.setStart(oldRange.startContainer, oldRange.startOffset)
-    newRange.setEnd(oldRange.startContainer, oldRange.startOffset)
+      return true
+    }
 
-    // 渲染新节点，此时新旧节点共存，通过debugger可看出
-    this[RENDER_TO_DOM](newRange)
+    let update = (oldNode, newNode) => {
+      // 简易diff算法，比较type、props（值和长度）、textNode的content
 
-    // 将就区间oldRange起始点改为newRange的结束为止，防止将新节点删除
-    oldRange.setStart(newRange.endContainer, newRange.endOffset)
-    // 删除旧节点
-    oldRange.deleteContents();
+      // 不同则全量更新
+      if (!isSameNode(oldNode, newNode)) return newNode[RENDER_TO_DOM](oldNode[RANGE])
+      // 一样则将oldNode的range（渲染范围）赋给newNode
+      newNode[RANGE] = oldNode[RANGE]
+
+      // 处理children
+      let newChildren = newNode.vchildren
+      let oldChildren = oldNode.vchildren
+
+      // 无新节点弹出
+      if (!newChildren || !newChildren.length) return;
+
+      // oldNode 最后节点记录，用于追加节点
+      let tailRnage = oldChildren[oldChildren.length - 1][RANGE]
+
+      for(let i = 0; i < newChildren.length; i ++) {
+        let newChild = newChildren[i];
+        let oldChild = oldChildren[i];
+
+        if (i < oldChildren.length) {
+          update(oldChild, newChild)
+        } else {
+          let insertRange = document.createRange();
+          insertRange.setStart(tailRnage.endContainer, tailRnage.endOffset);
+          insertRange.setEnd(tailRnage.endContainer, tailRnage.endOffset);
+          newChild[RENDER_TO_DOM](insertRange)
+          // 更新最后节点位置，可以继续拼接节点
+          tailRnage = insertRange
+        }
+      }
+
+    }
+    // 新虚拟dom
+    let vdom = this.vdom;
+    // 更新
+    update(this.oldVdom, vdom);
+    // 更新完成 替换原 oldVdom
+    this.oldVdom = vdom
+
   }
 
   /**
@@ -148,7 +132,88 @@ export class Component {
     // 合并
     merge(this.state, newState)
     // 重新渲染
-    this.rerender()
+    this.update()
+  }
+}
+
+/**
+ * @description 处理元素节点
+ * @data 2020/8/22
+ * @param {*}
+ */
+class ElementWrapper extends Component {
+  constructor(type) {
+    super()
+    this.type = type
+  }
+
+  get vdom() {
+    this.vchildren = this.children.map(child => child.vdom)
+    return this
+  }
+
+  // get vchildren() {
+  //   return this.children.map(child => child.vdom)
+  // }
+
+  /**
+   * @description 渲染dom
+   * @data 2020/8/23
+   * @param {Range} range 渲染范围区间
+   */
+  [RENDER_TO_DOM](range) {
+    this[RANGE] = range;
+
+    let root = document.createElement(this.type);
+
+    for (let name in this.props) {
+      let value = this.props[name];
+      // 过滤onClick属性，绑定原生事件
+      if (name.match(/on([\s\S]+)$/)) {
+        let eventName = RegExp.$1.replace(/^[\s\S]/, s => s.toLocaleLowerCase())
+        root.addEventListener(eventName, value)
+      } else if (name === 'className') root.setAttribute('class', value)
+      else root.setAttribute(name, value);
+    }
+
+    if (!this.vchildren) this.vchildren = this.children.map(child => child.vdom);
+
+    for (let child of this.vchildren) {
+      let childRange = document.createRange();
+      childRange.setStart(root, root.childNodes.length);
+      childRange.setEnd(root, root.childNodes.length);
+      child[RENDER_TO_DOM](childRange);
+    }
+    // 重新绘制
+    repalceContent(range, root)
+  }
+}
+
+/**
+ * @description  处理文本节点
+ * @data 2020/8/22
+ * @param {*}
+ */
+class TextWrapper extends Component {
+  constructor(content) {
+    super()
+    this.content = content
+    this.type = '#text'
+  }
+
+  get vdom() {
+    return this
+  }
+
+  /**
+   * @description 渲染dom
+   * @data 2020/8/23
+   * @param {Range} range 渲染范围区间
+   */
+  [RENDER_TO_DOM](range) {
+    this[RANGE] = range;
+    let root = document.createTextNode(this.content)
+    repalceContent(range, root)
   }
 }
 
